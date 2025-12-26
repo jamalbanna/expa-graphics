@@ -1,151 +1,218 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import requests
+from datetime import datetime
+import plotly.express as px
 
-# Set the title and favicon that appear in the Browser's tab bar.
+# -----------------------------------------------------------------------------
+# Page config
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title='AIESEC Exchange Analytics',
+    page_icon='🌍',
+    layout='wide'
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
+st.title("🌍 AIESEC Exchange Analytics Dashboard")
 
 # -----------------------------------------------------------------------------
-# Draw the actual page
+# Sidebar Inputs
+st.sidebar.header("API & Filter Settings")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+access_token = st.sidebar.text_input(
+    "Enter your AIESEC EXPA API Access Token",
+    type="password"
+)
+if not access_token:
+    st.info("""
+        🔑 Please enter your AIESEC EXPA Analytics access token in the sidebar.  
+        You can get your token by:
+        1. Going to [EXPA Analytics](https://expa.aiesec.org/analytics/)
+        2. Logging in
+        3. Copying the access token from your account settings or API section
+    """)
+    st.stop()
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+# Exchange type (single select)
+exchange_type_map = {
+    "Outgoing": "person",
+    "Incoming": "opportunity"
+}
+selected_exchange_type = st.sidebar.selectbox(
+    "Select Exchange Type",
+    options=list(exchange_type_map.keys())
 )
 
-''
-''
+# Programmes (multi-select)
+programme_map = {
+    "Global Volunteer": 6,
+    "Global Talent": 7,
+    "Global Teacher": 8
+}
+selected_programmes = st.sidebar.multiselect(
+    "Select Programme(s)",
+    options=list(programme_map.keys()),
+    default=list(programme_map.keys())
+)
 
+# Entity filter (required)
+entity_id_input = st.sidebar.text_input(
+    "Enter Entity ID (required)",
+    value=""
+)
+try:
+    office_id = int(entity_id_input)
+except:
+    st.warning("Please enter a valid numeric Entity ID")
+    st.stop()
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+# Date range
+start_date = st.sidebar.date_input("Start Date", value=datetime(2024, 1, 1))
+end_date = st.sidebar.date_input("End Date", value=datetime(2024, 12, 31))
 
-st.header(f'GDP in {to_year}', divider='gray')
+# Chart styling options
+st.sidebar.header("Chart Options")
+line_shape = st.sidebar.selectbox("Line Style", ["linear", "spline"])
 
-''
+# -----------------------------------------------------------------------------
+# Function: fetch data
+@st.cache_data(ttl=3600)
+def fetch_exchange_data(token, exchange_type, programmes, start_date, end_date, interval="month", office_id=None):
+    API_URL = "https://analytics.api.aiesec.org/v2/applications/analyze.json"
 
+    params = {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "histogram[type]": exchange_type_map[exchange_type],  # dynamic by exchange type
+        "histogram[interval]": interval,
+        "exchange_type": exchange_type_map[exchange_type],
+        "histogram[office_id]": office_id,
+        "access_token": token
+    }
+
+    for prog in programmes:
+        params.setdefault("programmes[]", []).append(programme_map[prog])
+
+    response = requests.get(API_URL, params=params)
+    if response.status_code != 200:
+        st.error(f"API request failed with status code {response.status_code}")
+        st.json(response.json())
+        st.stop()
+
+    json_data = response.json()
+    if "analytics" not in json_data:
+        st.error("API response does not contain 'analytics'. Full response:")
+        st.json(json_data)
+        st.stop()
+
+    data = json_data["analytics"]
+
+    STATUS_MAP = {
+        "total_applications": "Applied",
+        "total_an_accepted": "Accepted",
+        "total_approvals": "Approved",
+        "total_realized": "Realized",
+        "total_finished": "Finished",
+        "total_completed": "Completed"
+    }
+
+    rows = []
+    for key, label in STATUS_MAP.items():
+        if key not in data:
+            continue
+        parent_key = "people" if key == "total_signup" else "applications"
+        if parent_key not in data[key] or "buckets" not in data[key][parent_key]:
+            continue
+        buckets = data[key][parent_key]["buckets"]
+        for b in buckets:
+            rows.append({
+                "date": pd.to_datetime(b["key_as_string"]),
+                "status": label,
+                "count": b["doc_count"]
+            })
+
+    df = pd.DataFrame(rows)
+    return df
+
+# Fetch data
+exchange_df = fetch_exchange_data(
+    token=access_token,
+    exchange_type=selected_exchange_type,
+    programmes=selected_programmes,
+    start_date=start_date,
+    end_date=end_date,
+    office_id=office_id
+)
+
+if exchange_df.empty:
+    st.warning("No data returned from the API for the selected filters.")
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# Status filter
+st.subheader("Filter Statuses")
+statuses = exchange_df["status"].unique()
+selected_statuses = st.multiselect(
+    "Select statuses to display",
+    options=statuses,
+    default=list(statuses)
+)
+filtered_df = exchange_df[exchange_df["status"].isin(selected_statuses)]
+
+# Remove Sign Up from chart
+filtered_df = filtered_df[filtered_df["status"] != "Sign Up"]
+
+# -----------------------------------------------------------------------------
+# Time-series chart (Plotly)
+st.header("Exchange Trends Over Time")
+fig = px.line(
+    filtered_df,
+    x="date",
+    y="count",
+    color="status",
+    line_shape=line_shape,
+    markers=True,
+    title="Exchange Progress Over Time",
+    labels={"count": "Number of People/Applications", "date": "Date", "status": "Status"}
+)
+fig.update_traces(line=dict(width=3))  # thicker lines
+fig.update_layout(template="plotly_white", legend_title_text="Status")
+st.plotly_chart(fig, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# Funnel conversion with numbers + %
+st.header("Funnel Conversion Rates")
+pivot_df = filtered_df.pivot(index="date", columns="status", values="count").fillna(0)
+funnel_steps = ["Applied", "Accepted", "Approved", "Realized", "Finished", "Completed"]
+
+funnel_data = []
+for i in range(len(funnel_steps)-1):
+    step_from = funnel_steps[i]
+    step_to = funnel_steps[i+1]
+    from_sum = pivot_df.get(step_from, pd.Series([0])).sum()
+    to_sum = pivot_df.get(step_to, pd.Series([0])).sum()
+    rate = to_sum / from_sum if from_sum > 0 else 0
+    funnel_data.append({
+        "Step": f"{step_from} → {step_to}",
+        "From Count": int(from_sum),
+        "To Count": int(to_sum),
+        "Conversion %": f"{rate*100:.1f}%"
+    })
+
+funnel_df = pd.DataFrame(funnel_data)
+st.table(funnel_df)
+
+# -----------------------------------------------------------------------------
+# Key metrics
+st.header("Key Metrics")
 cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+with cols[0]:
+    st.metric("Total Applied", int(pivot_df.get("Applied", pd.Series([0])).sum()))
+with cols[1]:
+    st.metric("Total Approved", int(pivot_df.get("Approved", pd.Series([0])).sum()))
+with cols[2]:
+    st.metric("Total Realized", int(pivot_df.get("Realized", pd.Series([0])).sum()))
+with cols[3]:
+    total_applied = pivot_df.get("Applied", pd.Series([0])).sum()
+    total_realized = pivot_df.get("Realized", pd.Series([0])).sum()
+    realization_rate = total_realized / total_applied if total_applied > 0 else 0
+    st.metric("Realization Rate", f"{realization_rate*100:.1f}%")
