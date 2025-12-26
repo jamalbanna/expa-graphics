@@ -9,7 +9,8 @@ import plotly.express as px
 st.set_page_config(
     page_title='AIESEC Exchange Analytics',
     page_icon='🌍',
-    layout='wide'
+    layout='wide'. 
+    initial_sidebar_state='expanded'
 )
 
 st.title("🌍 AIESEC Exchange Analytics Dashboard")
